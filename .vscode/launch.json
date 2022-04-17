@@ -12,8 +12,8 @@
             "console": "integratedTerminal",
             "justMyCode": true,
             "args": [
-                "-l", "10.5.0.3",
-                "-d", "haulmont.com"
+                // "-l", "10.5.0.3",
+                // "-d", "haulmont.com"
             ]
         }
     ]

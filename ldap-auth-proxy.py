@@ -8,7 +8,6 @@ import base64
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import signal
 import sys
-import threading
 from socketserver import ThreadingMixIn
 from ldap3 import Server, Connection
 
@@ -60,7 +59,7 @@ class AuthHandler(BaseHTTPRequestHandler):
         return False
 
     # Log the error and complete the request with appropriate status
-    def auth_failed(self, ctx, errmsg = None):
+    def auth_failed(self, ctx, errmsg = None, send_401 = True):
 
         msg = 'Error while ' + ctx['action']
         if errmsg:
@@ -71,13 +70,16 @@ class AuthHandler(BaseHTTPRequestHandler):
         if ex != None:
             msg += ": " + str(value)
 
-        if ctx.get('url'):
-            msg += ', server="%s"' % ctx['url']
-
+        if ctx.get('cur_ldap_server'):
+            msg += ', ldap_server="%s"' % ctx['cur_ldap_server']
         if ctx.get('user'):
             msg += ', login="%s"' % ctx['user']
 
         self.log_error(msg)
+        if send_401:
+            self.send_401(ctx)
+
+    def send_401(self, ctx):
         self.send_response(401)
         self.send_header('WWW-Authenticate', 'Basic realm="' + ctx['realm'] + '"')
         self.send_header('Cache-Control', 'no-cache')
@@ -114,7 +116,8 @@ class LDAPAuthProxyHandler(AuthHandler):
             'realm': ('X-Ldap-Realm', 'Restricted'),
             'ldap_server': ('X-Ldap-Server', 'localhost'),
             'ldap_use_ssl': ('X-Ldap-SSL', True),
-            'ldap_domain': ('X-Ldap-Domain', '')
+            'ldap_domain': ('X-Ldap-Domain', ''),
+            'ldap_timeout': ('X-Ldap-Timeout', 1)
         }
 
     @classmethod
@@ -147,22 +150,34 @@ class LDAPAuthProxyHandler(AuthHandler):
                 self.log_message('LDAP Server is not set!')
                 return
 
-            ctx['action'] = 'initializing LDAP connection'
-            with Connection(
-                    Server(ctx['ldap_server'], use_ssl=ctx['ldap_use_ssl']),
-                    user=f"{ctx['user']}@{ctx['ldap_domain']}",
-                    password=ctx['pass'],
-            ) as conn:
-                if conn.bind():
-                    self.log_message('Auth OK for user "%s"' % (ctx['user']))
+            ctx['action'] = 'checking user creds in LDAP directory'
+            ldap_servers_str = ctx['ldap_server'].split(',')
+            timeout = int(ctx['ldap_timeout'])
+            for s in ldap_servers_str:
+                try:
+                    ctx['cur_ldap_server'] = s
+                    ldap_server = Server(s, use_ssl=ctx['ldap_use_ssl'],
+                        connect_timeout=timeout)
+                    with Connection(
+                            ldap_server,
+                            user=f"{ctx['user']}@{ctx['ldap_domain']}",
+                            password=ctx['pass'],
+                    ) as conn:
+                        if conn.bind():
+                            self.log_message('Auth OK for user "%s"' % (ctx['user']))
 
-                    # Successfully authenticated user
-                    self.send_response(200)
-                    self.send_header('content-type','text/html')
-                    self.end_headers()
-                    # self.wfile.write("User OK!")
-                else:
-                    self.auth_failed(ctx)
+                            # Successfully authenticated user
+                            self.send_response(200)
+                            # self.send_header('content-type','text/html')
+                            self.end_headers()
+                            return
+                        else:
+                            self.auth_failed(ctx, send_401=False)
+                except:
+                    self.auth_failed(ctx, send_401=False)
+
+            ctx['action'] = 'after checking creds'
+            self.auth_failed(ctx)
 
         except:
             self.auth_failed(ctx)
@@ -181,7 +196,9 @@ def arg_parser():
     group = parser.add_argument_group(title="LDAP options")
     group.add_argument('-l', '--ldap-server', metavar="ldap_server",
         default="localhost",
-        help=("LDAP Server (Default: localhost)"))
+        help="LDAP Server (Default: localhost). You can specify multiple servers separated by commas.")
+    group.add_argument('-t', '--ldap-timeout', metavar='seconds',
+        default=1, help="Ldap Server timeout in seconds (Default: 1")
     group.add_argument('--not-use-ssl', action='store_true',
         help=("Do not use SSL when connecting to Ldap Server"))
     group.add_argument('-d', '--ldap-domain', metavar="ldap_domain",
@@ -197,7 +214,8 @@ def arg_parser():
              'realm': ('X-Ldap-Realm', args.realm),
              'ldap_server': ('X-Ldap-Server', args.ldap_server),
              'ldap_use_ssl': ('X-Ldap-SSL', not args.not_use_ssl),
-             'ldap_domain': ('X-Ldap-Domain', args.ldap_domain)
+             'ldap_domain': ('X-Ldap-Domain', args.ldap_domain),
+             'ldap_timeout': ('X-Ldap-Timeout', args.ldap_timeout)
     }
     return listen, params
  
@@ -216,6 +234,6 @@ if __name__ == '__main__':
 
     sys.stdout.write("Start listening on %s:%d...\n" % listen)
     sys.stdout.flush()
-    print(listen)
-    print(params)
+    # print(listen)
+    # print(params)
     server.serve_forever()

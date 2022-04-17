@@ -1,0 +1,16 @@
+[Unit]
+Description=LDAP authentication proxy for Nginx
+After=network.target network-online.target
+
+[Service]
+Type=simple
+User=www
+Group=www
+WorkingDirectory=/var/run
+ExecStart=/opt/ldap-auth-proxy/ldap-auth-proxy
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
