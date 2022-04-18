@@ -4,10 +4,10 @@ After=network.target network-online.target
 
 [Service]
 Type=simple
-User=www
-Group=www
+User=www-data
+Group=www-data
 WorkingDirectory=/var/run
-ExecStart=/opt/ldap-auth-proxy/ldap-auth-proxy
+ExecStart=/opt/ldap-auth-proxy/ldap-auth-proxy.py --host localhost
 KillMode=process
 KillSignal=SIGINT
 Restart=on-failure
