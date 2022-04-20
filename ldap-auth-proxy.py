@@ -6,10 +6,13 @@
 import argparse
 import base64
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from multiprocessing import Lock
 import signal
 import sys
 from socketserver import ThreadingMixIn
 from ldap3 import Server, Connection
+from cachetools import TTLCache
+from threading import Lock
 
 class LdapAuthProxyServer(ThreadingMixIn, HTTPServer):
     pass
@@ -117,7 +120,9 @@ class LDAPAuthProxyHandler(AuthHandler):
             'ldap_server': ('X-Ldap-Server', 'localhost'),
             'ldap_use_ssl': ('X-Ldap-SSL', True),
             'ldap_domain': ('X-Ldap-Domain', ''),
-            'ldap_timeout': ('X-Ldap-Timeout', 1)
+            'ldap_timeout': ('X-Ldap-Timeout', 1),
+            'cache_ttl': ('X-Cache-TTL', '300'),
+            'cache_size': ('X-Cache-Size', '4096')
         }
 
     @classmethod
@@ -127,8 +132,31 @@ class LDAPAuthProxyHandler(AuthHandler):
     def get_params(self):
         return self.params
 
+    def check_creds(self, login, pwd):
+
+        timeout = int(self.ctx['ldap_timeout'])
+        ldap_servers = self.ctx['ldap_server'].split(',')
+        for ls in ldap_servers:
+            self.ctx['cur_ldap_server'] = ls
+            try:
+                l_server = Server(ls, use_ssl=self.ctx['ldap_use_ssl'],
+                    connect_timeout=timeout)
+                with Connection(
+                    l_server,
+                    user=f"{login}@{self.ctx['ldap_domain']}",
+                    password=pwd
+                ) as conn:
+                    if conn.bind():
+                       return True
+            except:
+                self.auth_failed(self.ctx, send_401=False)
+            return False
+
+
     # GET handler for the authentication request
     def do_GET(self):
+
+        global cache, cache_lock
 
         ctx = dict()
         self.ctx = ctx
@@ -145,41 +173,32 @@ class LDAPAuthProxyHandler(AuthHandler):
             self.auth_failed(ctx, 'attempt to use empty password')
             return
 
-        try:
-            if not ctx['ldap_server']:
-                self.log_message('LDAP Server is not set!')
-                return
+        if not ctx['ldap_server']:
+            self.log_message('LDAP Server is not set!')
+            return
+        
+        if cache is None:
+            cache = TTLCache(maxsize=int(ctx['cache_size']), ttl=int(ctx['cache_ttl']))
 
-            ctx['action'] = 'checking user creds in LDAP directory'
-            ldap_servers_str = ctx['ldap_server'].split(',')
-            timeout = int(ctx['ldap_timeout'])
-            for s in ldap_servers_str:
-                try:
-                    ctx['cur_ldap_server'] = s
-                    ldap_server = Server(s, use_ssl=ctx['ldap_use_ssl'],
-                        connect_timeout=timeout)
-                    with Connection(
-                            ldap_server,
-                            user=f"{ctx['user']}@{ctx['ldap_domain']}",
-                            password=ctx['pass'],
-                    ) as conn:
-                        if conn.bind():
-                            self.log_message('Auth OK for user "%s"' % (ctx['user']))
+        ctx['action'] = 'checking user creds in cache'
+        if cache.get(f"{ctx['user']}:::{ctx['pass']}"):
+            # creds found in cache then succefully authenticated user
+            self.log_message("found in cache")
+            self.send_response(200)
+            self.end_headers()
+            return
 
-                            # Successfully authenticated user
-                            self.send_response(200)
-                            # self.send_header('content-type','text/html')
-                            self.end_headers()
-                            return
-                        else:
-                            self.auth_failed(ctx, send_401=False)
-                except:
-                    self.auth_failed(ctx, send_401=False)
-
+        ctx['action'] = 'checking user creds in LDAP directory'
+        if self.check_creds(ctx['user'], ctx['pass']):
+            # Successfully authenticated user
+            self.send_response(200)
+            self.end_headers()
+            # save result in cache
+            with cache_lock:
+                cache[f"{ctx['user']}:::{ctx['pass']}"] = True
+            return
+        else:
             ctx['action'] = 'after checking creds'
-            self.auth_failed(ctx)
-
-        except:
             self.auth_failed(ctx)
 
 
@@ -207,6 +226,12 @@ def arg_parser():
     group = parser.add_argument_group(title="HTTP options")
     group.add_argument('-r', '--realm', metavar='"Restricted Area"',
         default="Restricted", help='HTTP auth realm (Default: "Restricted")')
+    
+    group = parser.add_argument_group(title="Cache options")
+    group.add_argument('-c', '--cache-ttl', metavar="seconds", 
+        default='300', help='Authenticated credits cache ttl (Default: 300)')
+    group.add_argument('-s', '--cache-size', metavar='items',
+        default='4096', help='Cache size (Default: 4096)')
 
     args = parser.parse_args()
     listen = (args.host, args.port)
@@ -215,7 +240,9 @@ def arg_parser():
              'ldap_server': ('X-Ldap-Server', args.ldap_server),
              'ldap_use_ssl': ('X-Ldap-SSL', not args.not_use_ssl),
              'ldap_domain': ('X-Ldap-Domain', args.ldap_domain),
-             'ldap_timeout': ('X-Ldap-Timeout', args.ldap_timeout)
+             'ldap_timeout': ('X-Ldap-Timeout', args.ldap_timeout),
+             'cache_ttl': ('X-Cache-TTL', args.cache_ttl),
+             'cache_size': ('X-Cache-Size', args.cache_size)
     }
     return listen, params
  
@@ -224,6 +251,8 @@ def exit_handler(signal, frame):
     sys.stdout.flush()
     sys.exit(0)
 
+
+
 if __name__ == '__main__':
     listen, params = arg_parser()
 
@@ -231,6 +260,10 @@ if __name__ == '__main__':
     server = LdapAuthProxyServer(listen, LDAPAuthProxyHandler)
     signal.signal(signal.SIGINT, exit_handler)
     signal.signal(signal.SIGTERM, exit_handler)
+
+    # caching obj
+    cache = None
+    cache_lock = Lock()
 
     sys.stdout.write("Start listening on %s:%d...\n" % listen)
     sys.stdout.flush()
