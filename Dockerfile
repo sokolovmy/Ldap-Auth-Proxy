@@ -6,7 +6,7 @@ WORKDIR /opt/ldap-auth-proxy/
 
 # Install required software
 RUN \
-    pip install ldap3
+    pip install ldap3 cachetools
 
 EXPOSE 8080
 

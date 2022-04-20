@@ -182,6 +182,9 @@ class LDAPAuthProxyHandler(AuthHandler):
 
         ctx['action'] = 'checking user creds in cache'
         if cache.get(f"{ctx['user']}:::{ctx['pass']}"):
+            # update ttl
+            with cache_lock:
+                cache[f"{ctx['user']}:::{ctx['pass']}"] = True
             # creds found in cache then succefully authenticated user
             self.log_message("found in cache")
             self.send_response(200)
